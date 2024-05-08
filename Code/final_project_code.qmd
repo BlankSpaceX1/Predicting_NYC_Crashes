@@ -1,0 +1,395 @@
+---
+title: "Examining New York City Crash Data"
+author: "Emmanuel Yankson"
+format: revealjs
+width: 900
+height: 600
+margin: 0.5
+center: False
+---
+
+```{python}
+import pandas as pd 
+from uszipcode import SearchEngine
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+from shapely.geometry import Point 
+import geopandas as gpd 
+from shapely.geometry import Point, Polygon
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import LabelEncoder
+from sklearn.impute import SimpleImputer
+import squarify 
+
+pd.set_option('display.max_columns', None)
+```
+
+```{python,results='hide'}
+collision_df = pd.read_feather('/Users/emmanuely/Desktop/Homework_Assignments/Spring_2024_Classes/STAT_3255/final-project-BlankSpaceX1/Data/Motor_Vehicle_Collisions_and_Crashes.feather')
+```
+
+
+## Inspiration & Previous Works
+:::{.r-fit-text}
+
+- New York City is known to be a very chaotic place, especially when it comes
+to the traffic. By being able to study the data and looking for where the most
+accidents happen, we can make navigating NYC safer for everyone.
+- The work done by those who partipated in the 2022 Data jamboree laid some 
+of the foundation for the model used.
+:::
+
+## Viewing the Data
+:::{.r-fit-text}
+
+- We can take a chunk of our data and use google maps to properly examine
+where these accidents are taking place.
+```{python}
+collision_df.head()
+```
+```{python}
+#Defines chunks of different data wbich are easier to work with
+chunk_size = 15000
+num_chunks = len(collision_df) // chunk_size + 1  
+
+chunks = [collision_df.iloc[i*chunk_size:(i+1)*chunk_size] for i in range(num_chunks)]
+
+first_chunk = chunks[0]
+```
+```{python}
+polygon = Polygon([(0, 0), (0, 2), (2, 2), (2, 0), (0, 0)])
+gdf3 = gpd.GeoDataFrame(geometry=[polygon])
+
+geometry = [Point(xy) for xy in zip(first_chunk["LONGITUDE"], first_chunk["LATITUDE"]) if not Point(xy).is_empty]
+
+crs = {'init': 'epsg:4326'}
+crash_gdf = gpd.GeoDataFrame(first_chunk.loc[~pd.isna(first_chunk["LONGITUDE"]) & ~pd.isna(first_chunk["LATITUDE"])], 
+                              crs=crs, geometry=geometry)
+
+crash_gdf.explore(column='BOROUGH', legend=True, legend_kwds={'labels': {'BRONX': 'Red', 'BROOKLYN': 'Blue',
+                                                                         'MANHATTAN': 'Green', "QUEENS":'Brown', 
+                                                                         "STATEN ISLAND": 'Yellow'}})
+```
+
+:::{.r-fit-text}
+- Now that we've examined the mapping, let's look at some hotspots that
+appear in our data.
+
+## Examining Hotspots
+```{python}
+borough_accidents = collision_df['BOROUGH'].value_counts()
+borough_accidents_df = pd.DataFrame({'Borough': borough_accidents.index, 
+                                     'Frequency of Accident': borough_accidents.values})
+
+sns.barplot(data=borough_accidents_df, x="Borough", y="Frequency of Accident")
+plt.xlabel("Borough")
+plt.ylabel("Frequency of Accident")
+plt.title("Accidents Frequency by Borough")
+plt.show()
+```
+
+:::
+
+:::{.r-fit-text}
+- We can go even further and examine each incident by the type it was,
+namely if it was just a pedestrian accident, cyclist accident, or 
+vehicle accident.
+
+```{python}
+lst_of_boroughs = collision_df['BOROUGH'].unique()
+
+lst_cyclists_injured = []
+lst_pedestrians_injured = []
+lst_motorists_injured = []
+
+for borough in lst_of_boroughs:
+    cyclists_injured = len(collision_df[(collision_df['BOROUGH'] == borough) & (collision_df['NUMBER OF CYCLIST INJURED'] >= 1)])
+    lst_cyclists_injured.append(cyclists_injured)
+    
+    pedestrians_injured = len(collision_df[(collision_df['BOROUGH'] == borough) & (collision_df['NUMBER OF PEDESTRIANS INJURED'] >= 1)])
+    lst_pedestrians_injured.append(pedestrians_injured)
+
+    motorists_injured = len(collision_df[(collision_df['BOROUGH'] == borough) & (collision_df['NUMBER OF MOTORIST INJURED'] >= 1)])
+    lst_motorists_injured.append(motorists_injured)
+
+incident_types = pd.DataFrame({'Cyclists Injured': lst_cyclists_injured, 'Pedestrians Injured': lst_pedestrians_injured,
+                               'Motorists Injured': lst_motorists_injured},
+                               index=lst_of_boroughs)
+```
+
+- Checking out the table and graph outputted:
+
+```{python}
+print(incident_types)
+
+incident_types.plot(kind='bar', stacked=True, color=['red', 'blue', 'green'])
+plt.title('Types of Injuries Across the Boroughs')
+plt.xlabel('Borough')
+plt.ylabel('Number of People Injured')
+plt.show()
+```
+
+- Brooklyn appears to be the borough with the highest amount of 
+crashes, so let's focus more closely on this borough.
+
+:::
+
+## Focusing on Brooklyn Borough
+```{python}
+crashes_in_brooklyn = collision_df[collision_df['BOROUGH'] == 'BROOKLYN']
+```
+
+```{python}
+crashes_in_brooklyn.head()
+```
+
+:::{.r-fit-text}
+- For this disaster of a borough, let's do some further visual analysis 
+before we do some machine learning. When are most of the crashes occurring?
+
+```{python}
+crashes_in_brooklyn['CRASH TIME'] = pd.to_datetime(crashes_in_brooklyn['CRASH TIME'])
+
+collisions_by_time = crashes_in_brooklyn.groupby(crashes_in_brooklyn['CRASH TIME'].dt.hour).size()
+
+
+plt.figure(figsize=(12, 6))
+plt.plot(collisions_by_time.index, collisions_by_time.values)
+plt.title('Collisions in Brooklyn by the Time of Day')
+plt.xlabel('Time of Day (24 Hour Time)')
+plt.ylabel('Number of Collisions')
+plt.xticks(range(24))  
+plt.grid(True)  
+plt.show()
+```
+
+:::
+
+:::{.r-fit-text}
+- Runing a further with the zipcodes
+```{python}
+brooklyn_accidents = crashes_in_brooklyn['ZIP CODE'].value_counts()
+brooklyn_accidents_df = pd.DataFrame({'Zip Code': brooklyn_accidents.index, 
+                                     'Frequency of Accident': brooklyn_accidents.values})
+
+plt.figure(figsize=(12, 6))
+
+sns.barplot(data=brooklyn_accidents_df, x="Zip Code", y="Frequency of Accident", palette='viridis')
+plt.xlabel("Zipcodes in Brooklyn")
+plt.ylabel("Frequency of Accident")
+plt.title("Accidents Frequency by Zip Code")
+plt.xticks(rotation=45, ha='right')  
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+plt.figure(figsize=(25, 13))
+
+squarify.plot(sizes=brooklyn_accidents_df['Frequency of Accident'],
+              label=brooklyn_accidents_df['Zip Code'],  
+              color=sns.color_palette("Spectral",  
+                                     len(brooklyn_accidents_df['Frequency of Accident']))) 
+plt.axis("off") 
+```
+
+- Seems like zip 11207 is a real issue.
+
+## Examining Zip Code 11207 in Brooklyn, NYC
+:::{.r-fit-text}
+
+```{python}
+zipcode_11207 = collision_df[(collision_df['BOROUGH'] == 'BROOKLYN') & (collision_df['ZIP CODE'] == 11207)]
+```
+
+```{python}
+zipcode_11207.head()
+```
+
+- For this disaster of a zipcode, let's do some further visual analysis 
+before we do some machine learning. When are most of the collisions occurring?
+
+```{python}
+zipcode_11207['CRASH TIME'] = pd.to_datetime(zipcode_11207['CRASH TIME'])
+
+collisions_by_time_11207 = zipcode_11207.groupby(zipcode_11207['CRASH TIME'].dt.hour).size()
+
+
+plt.figure(figsize=(12, 6))
+plt.plot(collisions_by_time_11207.index, collisions_by_time_11207.values)
+plt.title('Collisions in Brooklyn by the Time of Day')
+plt.xlabel('Time of Day (24 Hour Time)')
+plt.ylabel('Number of Collisions')
+plt.xticks(range(24))  
+plt.grid(True)  
+plt.show()
+```
+
+```{python}
+sns.set_theme()
+
+zipcode_11207['CRASH TIME'] = pd.to_datetime(zipcode_11207['CRASH TIME'])
+
+collisions_by_time = zipcode_11207.groupby(zipcode_11207['CRASH TIME'].dt.hour)[['NUMBER OF PEDESTRIANS INJURED', 
+                                                                                 'NUMBER OF CYCLIST INJURED', 'NUMBER OF MOTORIST INJURED']].sum()
+
+collisions_by_time = collisions_by_time.reset_index()
+
+pedestrians_injured = collisions_by_time['NUMBER OF PEDESTRIANS INJURED']
+cyclists_injured = collisions_by_time['NUMBER OF CYCLIST INJURED']
+motorists_injured = collisions_by_time['NUMBER OF MOTORIST INJURED']
+
+plt.figure(figsize=(12, 6))
+plt.stackplot(collisions_by_time['CRASH TIME'], pedestrians_injured, cyclists_injured, motorists_injured, 
+              labels=['Pedestrians Injured', 'Cyclists Injured', 'Motorists Injured'], colors=['blue', 'green', 'red'], alpha=0.7)
+
+plt.title('Collisions in Brooklyn Zipcode 11207 by the Time of Day')
+plt.xlabel('Time of Day (24 Hour Time)')
+plt.ylabel('Number of Injuries')
+plt.xticks(range(24))
+plt.legend(title='Injury Type')
+plt.grid(True)
+plt.show()
+```
+
+:::
+
+## Economic Analysis of Zipcode
+:::{.r-fit-text}
+- Now that we've seen the extent of the damage, can we examine some 
+factors that may contribute to these injuries? We can get a street like view 
+if we decide to get data like the median household income and such. With low 
+household income, it might explain why the infastructure of the area is so bad.
+
+```{python}
+search = SearchEngine()
+
+def get_zipcode_info(zipcode):
+    result = search.by_zipcode(zipcode)
+    if result:
+        return {
+            'Zipcode': zipcode,
+            'City': result.major_city,
+            'Density': result.population_density,
+            'Median Household Income': result.median_household_income,
+            'Median Home Value': result.median_home_value,
+            'Land Area': result.land_area_in_sqmi,
+        }
+    else:
+        return None
+
+zipcode_info_list = [get_zipcode_info(zipcode) for zipcode in crashes_in_brooklyn['ZIP CODE']]
+
+zipcode_info_list = [info for info in zipcode_info_list if info is not None]
+
+zipcode_info_df = pd.DataFrame(zipcode_info_list)
+```
+
+```{python}
+brooklyn_zipcode_lvl_data = zipcode_info_df.sort_values(by='Median Household Income', ascending=True)
+```
+
+```{python}
+brooklyn_zipcode_lvl_data
+```
+
+- The zipcode 11249 seems to be missing a lot of the data. 11249 is 
+Williamsburg, which is actually one of the wealthier zipcodes in Brooklyn, 
+so assuming that the data was present it would most likely top the list in 
+Brooklyn. This is supported even further as looking at the previous visuals 
+we see that 11249 has some of least amount of collisions in the hotspot that is 
+Brooklyn. 
+
+```{python}
+zipcode_11207_income = brooklyn_zipcode_lvl_data[brooklyn_zipcode_lvl_data['Zipcode'] == 11207]
+```
+
+```{python}
+zipcode_11207_income
+```
+
+- However on the opposite end of the spectrum we have the problem zipcode of 
+11207 which actually happens to be the fourth lowest zipcode in terms of 
+median household income. This seems to align with the idea that low economic
+data from a specific area infers that the infrastructure in that area is not 
+well maintained, which could contribute to the accidents in the area.
+
+- How can we further analyze this?
+
+:::
+
+## Machine Learning with Linear Modeling
+```{python}
+#importing the scaling and encoding needed for modeling
+scaler = StandardScaler()
+label_encoder = LabelEncoder()
+
+#Creating a separate df to make things easier
+brooklyn_model_df = pd.DataFrame({'Number of People Injured': crashes_in_brooklyn['NUMBER OF PERSONS INJURED'],
+                                  'Time of Crash': crashes_in_brooklyn['CRASH TIME'], 
+                                  'Median Household Income': zipcode_11207_income['Median Household Income'],
+                                  'Vehicle 1': crashes_in_brooklyn["CONTRIBUTING FACTOR VEHICLE 1"],
+                                  'Vehicle 2': crashes_in_brooklyn["CONTRIBUTING FACTOR VEHICLE 2"],
+                                  'Vehicle 3': crashes_in_brooklyn["CONTRIBUTING FACTOR VEHICLE 3"],
+                                  'Vehicle 4': crashes_in_brooklyn["CONTRIBUTING FACTOR VEHICLE 4"],
+                                  'Vehicle 5': crashes_in_brooklyn["CONTRIBUTING FACTOR VEHICLE 5"]
+                                  })
+
+brooklyn_model_df['Median Household Income'] = scaler.fit_transform(brooklyn_model_df[['Median Household Income']])
+
+brooklyn_model_df.dropna(subset=['Number of People Injured'], inplace=True)
+
+brooklyn_model_df['Time of Crash'] = pd.to_datetime(brooklyn_model_df['Time of Crash']).dt.hour + pd.to_datetime(brooklyn_model_df['Time of Crash']).dt.minute / 60.0
+
+
+for col in ["Vehicle 1", "Vehicle 2", 
+            "Vehicle 3", "Vehicle 4", 
+            "Vehicle 5"]:
+    brooklyn_model_df[col + '_present'] = brooklyn_model_df[col].notna().astype(int)
+
+X = brooklyn_model_df[['Time of Crash'] + [col + '_present' for col in ["Vehicle 1",
+                                                                 "Vehicle 2",
+                                                                 "Vehicle 3",
+                                                                 "Vehicle 4",
+                                                                 "Vehicle 5"]]]
+
+
+X['Scaled Median Household Income'] = brooklyn_model_df['Median Household Income']
+
+imputer = SimpleImputer(strategy='median')
+
+X_imputed = imputer.fit_transform(X)
+
+y = brooklyn_model_df['Number of People Injured']
+
+X.dropna(inplace=True)
+y = y[X.index] 
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+model = LinearRegression()
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_test)
+mse = mean_squared_error(y_test, y_pred)
+
+print(f"Mean Squared Error: {mse}")
+```
+
+
+## Conclusion
+:::{.r-fit-text}
+- Brooklyn, specifically the zipcode of 11207 sees the most amount of collisions
+- During the peak hours of 5pm is the most dangerous for navigating through NYC
+in terms of accidents and collisions
+- Economic data can be useful in inferring the volume of collisions in an area
+:::
+
+## References
+- Statistical Computing in Action 2022 - Data Jamboree
+https://asa-ssc.github.io/minisymp2022/jamboree/
